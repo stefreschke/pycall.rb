@@ -18,22 +18,28 @@ module PyCall
       super
     end
 
-    # todo test
     def self.wrap(something)
-      return something.to_s if Truffle::Interop.is_string?(something)
-      return nil if Truffle::Interop.null?(something)
       @@list_type ||= Polyglot.eval("python", "list")
       @@python_complex_class ||= Polyglot.eval('python', 'complex')
       @@python_isinstance ||= Polyglot.eval('python', 'isinstance')
-      return PyCall.from_py_complex(something) if @@python_isinstance.call(something, @@python_complex_class)
-      if Truffle::Interop.foreign?(something) then
-        return List.new(something) if @@python_isinstance.call(something, @@list_type)
-        return self.new(something) if Truffle::Interop.foreign?(something)
+
+      if Truffle::Interop.is_string?(something)
+        something.to_s
+      elsif Truffle::Interop.null?(something)
+        nil
+      elsif @@python_isinstance.call(something, @@python_complex_class)
+        PyCall.from_py_complex(something)
+      elsif Truffle::Interop.foreign?(something)
+        if @@python_isinstance.call(something, @@list_type)
+          List.new(something)
+        elsif Truffle::Interop.foreign?(something)
+          self.new(something)
+        end
+      else
+        something
       end
-      return something
     end
 
-    # todo test
     def self.unwrap(obj)
       if obj.nil? 
         PyCall::LibPython::API::None.__pyptr__
