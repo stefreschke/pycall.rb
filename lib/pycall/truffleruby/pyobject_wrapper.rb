@@ -6,6 +6,10 @@ module PyCall
       @__pyptr__
     end
 
+    def __pyptr__=(val)
+      @__pyptr__ = val
+    end
+
     def initialize(foreign)
       @__pyptr__ = foreign
     end
@@ -18,31 +22,47 @@ module PyCall
       super
     end
 
+    # todo test
     def self.wrap(something)
-      @@list_type ||= Polyglot.eval("python", "list")
-      @@python_complex_class ||= Polyglot.eval('python', 'complex')
-      @@python_isinstance ||= Polyglot.eval('python', 'isinstance')
-
-      if Truffle::Interop.is_string?(something)
-        something.to_s
-      elsif Truffle::Interop.null?(something)
-        nil
-      elsif @@python_isinstance.call(something, @@python_complex_class)
-        PyCall.from_py_complex(something)
-      elsif Truffle::Interop.foreign?(something)
-        if @@python_isinstance.call(something, @@list_type)
-          List.new(something)
-        elsif Truffle::Interop.foreign?(something)
-          self.new(something)
+      if Truffle::Interop.foreign?(something)
+        wrapper = Conversion.to_ruby(something)
+        unless wrapper
+          wrapper = private_wrap(something)
         end
+        return wrapper
       else
-        something
+        return something
       end
     end
 
+    def self.private_wrap(something)
+      @@python_complex_class ||= Polyglot.eval('python', 'complex')
+      @@python_isinstance ||= Polyglot.eval('python', 'isinstance')
+      @@python_isclass ||= Polyglot.eval('python', 'import inspect; inspect.isclass')
+
+      if Truffle::Interop.is_string?(something)
+        return something.to_s
+      elsif Truffle::Interop.null?(something)
+        return nil
+      else
+        if @@python_isinstance.call(something, @@python_complex_class)
+          return PyCall.from_py_complex(something)
+        elsif Truffle::Interop.foreign?(something)
+          if @@python_isclass.call(something)
+            return PyTypeObjectWrapper.new(something)
+          else
+            return self.new(something)
+          end
+        end
+      end
+      return something
+
+    end
+
+    # todo test
     def self.unwrap(obj)
       if obj.nil? 
-        PyCall::LibPython::API::None.__pyptr__
+        LibPython::API::ForeignNone
       elsif obj.kind_of?(PyCall::Tuple)
         obj.__pyptr__
       elsif obj.is_a?(Complex)
@@ -51,6 +71,8 @@ module PyCall
         obj.map { |part| self.unwrap(part) }
       elsif obj.is_a?(PyObjectWrapper)
         self.unwrap(obj.__pyptr__)
+      elsif obj.is_a?(PyRubyPtr)
+        obj.__ruby_object__
       else
         obj
       end
@@ -72,14 +94,23 @@ module PyCall
 
     def method_missing(name, *args)
       name_str = name.to_s if name.kind_of?(Symbol)
-      name_str.chop! if name_str.end_with?('=')
+      if name_str.end_with?('=') #setter method
+        name_str.chop!
+        self.[]=(name_str, args.first)
+        return
+      end
       obj_attr = @__pyptr__[name]
-      if PyCall.callable?(obj_attr)
+      @@callable ||= Polyglot.eval("python", "callable")
+      if @@callable.call(obj_attr)
         @@python_isclass ||= Polyglot.eval('python', 'import inspect; inspect.isclass')
         if @@python_isclass.call(obj_attr)
           return PyTypeObjectWrapper.wrap_class(obj_attr) #Class, imitate PyCalls behaviour by not calling Class, instead wrapping it
         else
-          PyObjectWrapper.wrap(obj_attr.call(*args)) #normal method call
+          begin
+            PyObjectWrapper.wrap(obj_attr.call(*PyObjectWrapper.unwrap(args))) #normal method call
+          rescue RuntimeError => e
+            raise PyCall::PyError.new(e.message, "", e.backtrace)
+          end
         end
       else
         PyObjectWrapper.wrap(obj_attr) #Return attribute, no method call
@@ -93,18 +124,31 @@ module PyCall
 
     def kind_of?(cls)
       @@python_isinstance ||= Polyglot.eval('python', 'isinstance')
-      case#maybe not no nice, but case cls does === comparison, and PyCall::Tuple === PyCall::Tuple is false
+      case
       when cls == Module
         true #required for tests
-      when cls == PyCall::PyPtr
-        true #required for tests
+      #when cls == PyCall::PyPtr
+      #  true #required for tests
       when cls == PyCall::Tuple
-        @@python_tupleclass ||= Polyglot.eval('python', 'tuple')
-        @@python_isinstance.call(@__pyptr__, @@python_tupleclass)
-      when cls == PyTypeObjectWrapper  # todo ==> PyObjectWrapper
+        Polyglot.eval('python', 'lambda x: type(x) is tuple').call(@__pyptr__)
+      when cls == PyCall::LibPython::API::PyBool_Type
+        Polyglot.eval("python", "lambda x: type(x) is bool").call(@__pyptr__)
+      when cls == PyCall::LibPython::API::PyString_Type
+        Polyglot.eval("python", "lambda x: type(x) is str").call(@__pyptr__)
+      when cls == PyCall::LibPython::API::PyUnicode_Type
+        if is_string
+          Polyglot.eval("python", "lambda s: all(ord(c) < 128 for c in s)").call(@__pyptr__)
+        else
+          false
+        end
+      when cls == PyCall::LibPython::API::PyList_Type
+        Polyglot.eval("python", "lambda x: type(x) is list").call(@__pyptr__)
+      when cls == PyCall::LibPython::API::PyFloat_Type
+        Polyglot.eval("python", "lambda x: type(x) is float").call(@__pyptr__)
+      when cls.is_a?(PyTypeObjectWrapper)
         @@python_isinstance.call(@__pyptr__, cls.__pyptr__)
-      when cls == PyObjectWrapper
-        true #@@python_isinstance.call(@__pyptr__, Conversion.get_type.cls.py)
+      else
+        super
       end
     end
 
@@ -157,7 +201,10 @@ module PyCall
     end
 
     def call(*args)
-      __pyptr__.call(*args)
+      if !Polyglot.eval("python", "callable").call(@__pyptr__)
+        raise TypeError, "not callable"
+      end
+      PyObjectWrapper.wrap(__pyptr__.call(*PyObjectWrapper.unwrap(args)))
     end
 
     class SwappedOperationAdapter

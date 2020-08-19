@@ -3,11 +3,12 @@ module PyCall
     include Enumerable
 
     def initialize(*args, **kwargs)
+      @@dict_class ||= Polyglot.eval("python", "dict")
       if args.first.kind_of?(Hash)
         super(build_dict(args.first))
       else
         if kwargs.empty?
-          super PyCall.builtins.dict.new()
+          super @@dict_class.call()
         else
           super(build_dict(kwargs))
         end
@@ -15,9 +16,10 @@ module PyCall
     end
 
     def build_dict(kwargs)
-      dict = PyCall.builtins.dict.new()
+      @@dict_class ||= Polyglot.eval("python", "dict")
+      dict = @@dict_class.call()
       kwargs.each do |key, value|
-        dict[key] = value
+        dict.__setitem__(key, value)
       end
       dict
     end
@@ -51,18 +53,37 @@ module PyCall
       @__pyptr__.pop(key)
     end
 
-    # todo
     def each(&block)
-      PyCall.builtins.list(@__pyptr__.items()) do | tuple |
-        block.call(tuple)
+      return enum_for unless block_given?
+      @@python_iter ||= Polyglot.eval('python', 'iter')
+      @@python_next ||= Polyglot.eval('python', 'next')
+      iterator = @@python_iter.call(__pyptr__)
+      while true
+        begin
+          item = @@python_next.call(iterator)
+        rescue#StopIteration Exception from Python
+          break
+        end
+        block.call(item, self[item])
       end
+      self
     end
 
-    # todo? whats this even?
     def to_h
       inject({}) do |h, (k, v)|
         h.update(k => v)
       end
     end
+
+    def kind_of?(cls)
+      case
+      when cls == PyCall::LibPython::API::PyDict_Type
+        true
+      else
+        super.kind_of?(cls)
+      end
+    end
   end
+
+  Conversion.register_python_type_mapping(Dict.new().__pyptr__, Dict)
 end

@@ -18,6 +18,8 @@ module PyCall
     def [](*key)
       if key.first.is_a?(PyObjectWrapper)
         PyObjectWrapper.wrap(@__pyptr__.__getitem__(key.first.__pyptr__))
+      elsif slice = PyCall::Slice.from_ruby_range(key.first)
+        PyObjectWrapper.wrap(@__pyptr__.__getitem__(slice.__pyptr__))
       else
         begin
           PyObjectWrapper.wrap(@__pyptr__.__getitem__(key.first))
@@ -28,7 +30,11 @@ module PyCall
     end
 
     def []=(*key, value)
-      @__pyptr__.__setitem__(key.first, value)
+      to_set = key.first
+      if slice = PyCall::Slice.from_ruby_range(to_set)
+        to_set = slice.__pyptr__
+      end
+      @__pyptr__.__setitem__(to_set, value)
     end
 
     def <<(item)
@@ -41,24 +47,20 @@ module PyCall
     end
 
     def sort
-      sort!
+      copy = PyCall.copy.deepcopy(@__pyptr__).__pyptr__
+      copy.sort
+      List.new(copy)
     end
 
     def sort!
-      @__pyptr__.sort
-
-
-
-      puts @__pyptr__
-      puts @__pyptr__.class
-      list = PyCall.copy.deepcopy(@__pyptr__)
-      list.sort
-      puts list
-      List.new(list)
+      @__pyptr__.sort()
+      self
     end
 
     def to_a
       Array.new (length) {|i| self[i]}
     end
   end
+
+  Conversion.register_python_type_mapping(List.new([]).__pyptr__, List)
 end
